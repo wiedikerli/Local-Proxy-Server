@@ -14,6 +14,49 @@ function question(query) {
 	return new Promise((resolve) => rl.question(query, resolve));
 }
 
+function checkWindowsPortsBlocked(ports) {
+	const blocked = [];
+	for (const port of ports) {
+		try {
+			// netstat output contains lines like "  TCP  0.0.0.0:80  ..."
+			const output = execSync(`netstat -an`, { encoding: "utf8" });
+			// Also check excluded port ranges reserved by http.sys
+			let reserved = "";
+			try {
+				reserved = execSync(
+					`netsh int ipv4 show excludedportrange protocol=tcp`,
+					{ encoding: "utf8" }
+				);
+			} catch (_) {}
+
+			const portInUse = output.split("\n").some((line) => {
+				const m = line.match(/TCP\s+[\d.:*]+:(\d+)\s/);
+				return m ? m[1] === String(port) : false;
+			});
+
+			// Check if port falls within an http.sys excluded range
+			let portReserved = false;
+			if (reserved) {
+				const rangeRegex = /(\d+)\s+(\d+)/g;
+				let m;
+				while ((m = rangeRegex.exec(reserved)) !== null) {
+					const start = parseInt(m[1], 10);
+					const num = parseInt(m[2], 10);
+					if (port >= start && port < start + num) {
+						portReserved = true;
+						break;
+					}
+				}
+			}
+
+			if (portInUse || portReserved) blocked.push(port);
+		} catch (_) {
+			// If we can't check, assume it's fine
+		}
+	}
+	return blocked;
+}
+
 async function main() {
 	console.log("🚀 Proxy Setup Script\n");
 
@@ -23,9 +66,10 @@ async function main() {
 	const domainWithWww = domain.startsWith("www.") ? domain : `www.${domain}`;
 
 	// Step 2: Get proxy port
-	const proxyPort = await question(
-		"Enter the port to proxy to (e.g., 44314): "
+	const proxyPortInput = await question(
+		"Enter the port to proxy to (default: 44314): "
 	);
+	const proxyPort = proxyPortInput.trim() || "44314";
 
 	console.log("\n📋 Configuration:");
 	console.log(`   Domain (with www): ${domainWithWww}`);
@@ -129,11 +173,11 @@ http {
 			const nonWwwEntry = `127.0.0.1   ${domainWithoutWww}`;
 
 			let needsUpdate = false;
-			if (!hostsContent.includes(domainWithWww)) {
+			if (!hostsContent.includes(wwwEntry)) {
 				hostsContent += `\n${wwwEntry}`;
 				needsUpdate = true;
 			}
-			if (!hostsContent.includes(domainWithoutWww)) {
+			if (!hostsContent.includes(nonWwwEntry)) {
 				hostsContent += `\n${nonWwwEntry}`;
 				needsUpdate = true;
 			}
@@ -181,6 +225,47 @@ http {
 	console.log("✅ Setup complete!\n");
 	const startDocker = await question("Start Docker Compose now? (y/n): ");
 	if (startDocker.toLowerCase() === "y") {
+		// Check if required ports are available on Windows
+		if (process.platform === "win32") {
+			const portsBlocked = checkWindowsPortsBlocked([80, 443]);
+			if (portsBlocked.length > 0) {
+				console.log(
+					`\n⚠️  Port(s) ${portsBlocked.join(", ")} are not available.`
+				);
+				console.log(
+					"   On Windows, this is usually caused by the HTTP.sys service (IIS, Hyper-V, etc.)."
+				);
+				const freePorts = await question(
+					"   Attempt to free port(s) automatically? (runs 'net stop http /y' as admin) (y/n): "
+				);
+				if (freePorts.toLowerCase() === "y") {
+					try {
+						execSync(
+							`powershell -Command "Start-Process cmd -Verb RunAs -ArgumentList '/c net stop http /y' -Wait"`,
+							{ stdio: "inherit" }
+						);
+						console.log("   ✓ HTTP.sys service stopped");
+					} catch (error) {
+						console.error(
+							"   ✗ Could not stop HTTP.sys. Try running manually as admin:"
+						);
+						console.log("     net stop http /y");
+						console.log('\nRun "docker compose up" when ready.');
+						rl.close();
+						return;
+					}
+				} else {
+					console.log(
+						"\n   To free port 80/443, run as Administrator:"
+					);
+					console.log("     net stop http /y");
+					console.log('\nRun "docker compose up" when ready.');
+					rl.close();
+					return;
+				}
+			}
+		}
+
 		console.log("\n🐳 Starting Docker Compose...\n");
 		try {
 			execSync("docker compose up", { stdio: "inherit" });

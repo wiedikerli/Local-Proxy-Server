@@ -52,13 +52,15 @@ async function main() {
 			let hostsContent = fs.readFileSync(hostsPath, "utf8");
 			const originalContent = hostsContent;
 
-			// Remove entries for both domains
+			// Remove entries for both domains (match exact host entries)
+			const wwwEntry = `127.0.0.1   ${domainWithWww}`;
+			const nonWwwEntry = `127.0.0.1   ${domainWithoutWww}`;
 			const lines = hostsContent.split("\n");
 			const filteredLines = lines.filter((line) => {
 				const trimmedLine = line.trim();
-				return !(
-					trimmedLine.includes(domainWithWww) ||
-					trimmedLine.includes(domainWithoutWww)
+				return (
+					trimmedLine !== wwwEntry &&
+					trimmedLine !== nonWwwEntry
 				);
 			});
 
@@ -127,16 +129,18 @@ async function main() {
 			const certFile = path.join(sslDir, `${domainWithWww}.pem`);
 			const keyFile = path.join(sslDir, `${domainWithWww}-key.pem`);
 
+			let certsFound = false;
 			if (fs.existsSync(certFile)) {
 				fs.unlinkSync(certFile);
 				console.log(`   ✓ Removed ${domainWithWww}.pem`);
+				certsFound = true;
 			}
 			if (fs.existsSync(keyFile)) {
 				fs.unlinkSync(keyFile);
 				console.log(`   ✓ Removed ${domainWithWww}-key.pem`);
+				certsFound = true;
 			}
-
-			if (!fs.existsSync(certFile) && !fs.existsSync(keyFile)) {
+			if (!certsFound) {
 				console.log("   ✓ No certificates found");
 			}
 		} catch (error) {
