@@ -153,3 +153,5 @@ Temporary Items
 /**/*.Web.UI/Umbraco/Data
 baseline.json
 **/wwwroot/scripts/variables.js
+
+*.pem

@@ -17,16 +17,29 @@ function question(query) {
 async function main() {
 	console.log("🧹 Proxy Cleanup Script\n");
 
-	// Step 1: Get domain name
-	const domain = await question(
-		"Enter the domain to remove (e.g., www.example.ch): "
+	// Step 1: Get domain name(s)
+	const domainsInput = await question(
+		"Enter the domain(s) to remove, comma-separated (e.g., www.example.ch, example.ch): "
 	);
-	const domainWithoutWww = domain.replace(/^www\./, "");
-	const domainWithWww = domain.startsWith("www.") ? domain : `www.${domain}`;
+	const rawDomains = domainsInput
+		.split(",")
+		.map((d) => d.trim())
+		.filter(Boolean);
+
+	// Expand each entered domain to its www/non-www pair, deduped, order preserved
+	const allDomains = [];
+	for (const raw of rawDomains) {
+		const withoutWww = raw.replace(/^www\./, "");
+		const withWww = raw.startsWith("www.") ? raw : `www.${raw}`;
+		for (const variant of [withoutWww, withWww]) {
+			if (!allDomains.includes(variant)) allDomains.push(variant);
+		}
+	}
 
 	console.log("\n📋 Will remove:");
-	console.log(`   - ${domainWithWww}`);
-	console.log(`   - ${domainWithoutWww}`);
+	for (const domainEntry of allDomains) {
+		console.log(`   - ${domainEntry}`);
+	}
 
 	const confirm = await question("\nProceed with cleanup? (y/n): ");
 	if (confirm.toLowerCase() !== "y") {
@@ -52,14 +65,14 @@ async function main() {
 			let hostsContent = fs.readFileSync(hostsPath, "utf8");
 			const originalContent = hostsContent;
 
-			// Remove entries for both domains
+			// Remove entries for all domains (match exact host entries)
+			const entriesToRemove = allDomains.map(
+				(domainEntry) => `127.0.0.1   ${domainEntry}`
+			);
 			const lines = hostsContent.split("\n");
 			const filteredLines = lines.filter((line) => {
 				const trimmedLine = line.trim();
-				return !(
-					trimmedLine.includes(domainWithWww) ||
-					trimmedLine.includes(domainWithoutWww)
-				);
+				return !entriesToRemove.includes(trimmedLine);
 			});
 
 			hostsContent = filteredLines.join("\n");
@@ -92,16 +105,15 @@ async function main() {
 			console.error(
 				"   ✗ Error updating hosts file. Please remove manually:"
 			);
-			console.log(`   Remove lines containing: ${domainWithWww}`);
-			console.log(`   Remove lines containing: ${domainWithoutWww}`);
+			for (const domainEntry of allDomains) {
+				console.log(`   Remove lines containing: ${domainEntry}`);
+			}
 		}
 	} else {
 		console.log("   Skipped. Remove these entries manually:");
 		console.log("   Windows: C:\\Windows\\System32\\drivers\\etc\\hosts");
 		console.log("   Mac/Linux: /etc/hosts\n");
-		console.log(
-			`   Lines containing: ${domainWithWww} or ${domainWithoutWww}`
-		);
+		console.log(`   Lines containing: ${allDomains.join(", ")}`);
 	}
 
 	// Step 3: Ask about stopping Docker
@@ -124,19 +136,26 @@ async function main() {
 	if (removeCerts.toLowerCase() === "y") {
 		try {
 			const sslDir = path.join(__dirname, "nginx", "ssl");
-			const certFile = path.join(sslDir, `${domainWithWww}.pem`);
-			const keyFile = path.join(sslDir, `${domainWithWww}-key.pem`);
+			let certsFound = false;
 
-			if (fs.existsSync(certFile)) {
-				fs.unlinkSync(certFile);
-				console.log(`   ✓ Removed ${domainWithWww}.pem`);
-			}
-			if (fs.existsSync(keyFile)) {
-				fs.unlinkSync(keyFile);
-				console.log(`   ✓ Removed ${domainWithWww}-key.pem`);
-			}
+			// Cert files are named after whichever domain was entered first at setup time,
+			// so try every entered domain as a possible base name.
+			for (const domainEntry of allDomains) {
+				const certFile = path.join(sslDir, `${domainEntry}.pem`);
+				const keyFile = path.join(sslDir, `${domainEntry}-key.pem`);
 
-			if (!fs.existsSync(certFile) && !fs.existsSync(keyFile)) {
+				if (fs.existsSync(certFile)) {
+					fs.unlinkSync(certFile);
+					console.log(`   ✓ Removed ${domainEntry}.pem`);
+					certsFound = true;
+				}
+				if (fs.existsSync(keyFile)) {
+					fs.unlinkSync(keyFile);
+					console.log(`   ✓ Removed ${domainEntry}-key.pem`);
+					certsFound = true;
+				}
+			}
+			if (!certsFound) {
 				console.log("   ✓ No certificates found");
 			}
 		} catch (error) {
