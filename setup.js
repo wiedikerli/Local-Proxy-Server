@@ -60,10 +60,27 @@ function checkWindowsPortsBlocked(ports) {
 async function main() {
 	console.log("🚀 Proxy Setup Script\n");
 
-	// Step 1: Get domain name
-	const domain = await question("Enter your domain (e.g., www.example.ch): ");
-	const domainWithoutWww = domain.replace(/^www\./, "");
-	const domainWithWww = domain.startsWith("www.") ? domain : `www.${domain}`;
+	// Step 1: Get domain name(s)
+	const domainsInput = await question(
+		"Enter your domain(s), comma-separated (e.g., www.example.ch, example.ch, sub.example.ch): "
+	);
+	const rawDomains = domainsInput
+		.split(",")
+		.map((d) => d.trim())
+		.filter(Boolean);
+
+	// Expand each entered domain to its www/non-www pair, deduped, order preserved
+	const allDomains = [];
+	for (const raw of rawDomains) {
+		const withoutWww = raw.replace(/^www\./, "");
+		const withWww = raw.startsWith("www.") ? raw : `www.${raw}`;
+		for (const variant of [withoutWww, withWww]) {
+			if (!allDomains.includes(variant)) allDomains.push(variant);
+		}
+	}
+
+	// Cert files are named after the first entered domain, but cover every domain via SAN
+	const certBaseName = allDomains[0];
 
 	// Step 2: Get proxy port
 	const proxyPortInput = await question(
@@ -72,8 +89,7 @@ async function main() {
 	const proxyPort = proxyPortInput.trim() || "44314";
 
 	console.log("\n📋 Configuration:");
-	console.log(`   Domain (with www): ${domainWithWww}`);
-	console.log(`   Domain (without www): ${domainWithoutWww}`);
+	console.log(`   Domains: ${allDomains.join(", ")}`);
 	console.log(`   Proxy Port: ${proxyPort}\n`);
 
 	const confirm = await question("Proceed with setup? (y/n): ");
@@ -87,7 +103,9 @@ async function main() {
 	console.log("\n🔐 Generating SSL certificates...");
 	try {
 		execSync(
-			`mkcert -cert-file ${domainWithWww}.pem -key-file ${domainWithWww}-key.pem ${domainWithWww} ${domainWithoutWww}`,
+			`mkcert -cert-file ${certBaseName}.pem -key-file ${certBaseName}-key.pem ${allDomains.join(
+				" "
+			)}`,
 			{ stdio: "inherit" }
 		);
 
@@ -97,8 +115,8 @@ async function main() {
 			fs.mkdirSync(sslDir, { recursive: true });
 		}
 
-		const certFile = `${domainWithWww}.pem`;
-		const keyFile = `${domainWithWww}-key.pem`;
+		const certFile = `${certBaseName}.pem`;
+		const keyFile = `${certBaseName}-key.pem`;
 
 		if (fs.existsSync(certFile)) {
 			fs.renameSync(certFile, path.join(sslDir, certFile));
@@ -120,20 +138,23 @@ async function main() {
 	// Step 4: Update nginx.conf
 	console.log("\n⚙️  Updating nginx configuration...");
 	const nginxConfPath = path.join(__dirname, "nginx", "nginx.conf");
+	const serverNames = allDomains.join(" ");
 
 	const nginxConf = `events {}
 
 http {
     server {
         listen 443 ssl;
-        server_name ${domainWithWww} ${domainWithoutWww};
+        server_name ${serverNames};
 
-        ssl_certificate     /etc/nginx/ssl/${domainWithWww}.pem;
-        ssl_certificate_key /etc/nginx/ssl/${domainWithWww}-key.pem;
+        ssl_certificate     /etc/nginx/ssl/${certBaseName}.pem;
+        ssl_certificate_key /etc/nginx/ssl/${certBaseName}-key.pem;
 
         location / {
             proxy_pass https://host.docker.internal:${proxyPort};
-            proxy_set_header Host $host;
+            proxy_ssl_server_name on;
+            proxy_set_header Host localhost;
+            proxy_set_header X-Forwarded-Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
@@ -143,7 +164,7 @@ http {
     # Also allow HTTP → HTTPS redirect if needed
     server {
         listen 80;
-        server_name ${domainWithWww} ${domainWithoutWww};
+        server_name ${serverNames};
         return 301 https://$host$request_uri;
     }
 }
@@ -169,17 +190,13 @@ http {
 			let hostsContent = fs.readFileSync(hostsPath, "utf8");
 
 			// Check if entries already exist
-			const wwwEntry = `127.0.0.1   ${domainWithWww}`;
-			const nonWwwEntry = `127.0.0.1   ${domainWithoutWww}`;
-
 			let needsUpdate = false;
-			if (!hostsContent.includes(wwwEntry)) {
-				hostsContent += `\n${wwwEntry}`;
-				needsUpdate = true;
-			}
-			if (!hostsContent.includes(nonWwwEntry)) {
-				hostsContent += `\n${nonWwwEntry}`;
-				needsUpdate = true;
+			for (const domainEntry of allDomains) {
+				const entry = `127.0.0.1   ${domainEntry}`;
+				if (!hostsContent.includes(entry)) {
+					hostsContent += `\n${entry}`;
+					needsUpdate = true;
+				}
 			}
 
 			if (needsUpdate) {
@@ -210,15 +227,18 @@ http {
 			console.error(
 				"   ✗ Error updating hosts file. Please add manually:"
 			);
-			console.log(`   127.0.0.1   ${domainWithWww}`);
-			console.log(`   127.0.0.1   ${domainWithoutWww}`);
+			for (const domainEntry of allDomains) {
+				console.log(`   127.0.0.1   ${domainEntry}`);
+			}
 		}
 	} else {
 		console.log("   Skipped. Add these entries manually:");
 		console.log("   Windows: C:\\Windows\\System32\\drivers\\etc\\hosts");
 		console.log("   Mac/Linux: /etc/hosts\n");
-		console.log(`   127.0.0.1   ${domainWithWww}`);
-		console.log(`   127.0.0.1   ${domainWithoutWww}\n`);
+		for (const domainEntry of allDomains) {
+			console.log(`   127.0.0.1   ${domainEntry}`);
+		}
+		console.log();
 	}
 
 	// Step 6: Docker compose
